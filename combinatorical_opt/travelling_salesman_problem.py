@@ -1,7 +1,7 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 import random
-import math
+import time
 
 
 def lexi_check(path):
@@ -12,15 +12,42 @@ def lexi_check(path):
             return True
     raise Exception('Something went wrong!')
 
+
+def fact(n):
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+
 class Node:
 
     def __init__(self, name):
         self.name = name
+        self.edges = []
 
     def __repr__(self):
         return self.__str__()
+
     def __str__(self):
         return self.name
+
+    # defining comparison operators
+    def __lt__(self, other):
+        if isinstance(other, Node):
+            return self.name < other.name
+        return NotImplemented
+
+    def __gt__(self, other):
+        if isinstance(other, Node):
+            return self.name > other.name
+        return NotImplemented
+
+    def add_edge(self, e):
+        for e_i in range(len(self.edges)):
+            if self.edges[e_i] > e:
+                self.edges = self.edges[:e_i] + [e] + self.edges[e_i:]
+                return
+        self.edges.append(e)
 
 
 class Edge:
@@ -33,8 +60,19 @@ class Edge:
 
     def __repr__(self):
         return self.__str__()
+
     def __str__(self):
         return "< " + str(self.source) + " -- " + str(self.target) + " w: " + str(self.weight) + ">"
+
+    def __lt__(self, other):
+        if isinstance(other, Edge):
+            return self.weight < other.weight
+        return NotImplemented
+
+    def __gt__(self, other):
+        if isinstance(other, Edge):
+            return self.weight > other.weight
+        return NotImplemented
 
 
 class Graph:
@@ -43,6 +81,12 @@ class Graph:
         self.E = E
         self.best_hams = []
         self.best_hams_bb = []
+        self.states_explored = 0
+        self.num_of_pruned = 0
+
+        for e in self.E:
+            e.source.add_edge(e)
+            e.target.add_edge(e)
 
     def paint_graph(self, only_hem=False, which_hem=0):
         G = nx.DiGraph()
@@ -81,7 +125,7 @@ class Graph:
         # Show the plot
         plt.show()
 
-    def is_in_ham(self, edge, which=0):
+    def is_in_ham(self, e, which=0):
         try:
             ham = self.best_hams[which]
         except Exception:
@@ -91,14 +135,14 @@ class Graph:
         for node_i in range(len(ham)):
             node_1 = ham[node_i]
             node_2 = ham[(node_i + 1) % len(ham)]
-            if (edge.source == node_1 and edge.target == node_2
-                    or edge.source == node_2 and edge.target == node_1 and not edge.is_oriented):
+            if (e.source == node_1 and e.target == node_2
+                    or e.source == node_2 and e.target == node_1 and not e.is_oriented):
                 return True
         return False
 
     def get_neighbour_nodes(self, node):
         neighbours = []
-        for edge in self.E:
+        for edge in node.edges:
             if edge.source == node:
                 neighbours.append(edge.target)
             elif not edge.is_oriented and edge.target == node:
@@ -106,15 +150,49 @@ class Graph:
         return neighbours
 
     def get_min_est(self, path):
-        # Should be returning the minimal cost of way we can get going along this path
-        # Will be using this for the branch and bound algorithm
-        return 0
+        # returns the minimal cost a path can achieve
+        cost = self.get_cost_of_sub_path(path)
+
+        for node in self.V:
+            if node not in path[:-1]:
+                cost += node.edges[0].weight
+
+        return cost
+
+    def mst_lower_bound(self, path):
+        cost = self.get_cost_of_sub_path(path)
+
+        subgraph_nodes = [path[0]]
+        if path[-1] not in subgraph_nodes:
+            subgraph_nodes.append(path[-1])
+
+        for node in self.V:
+            if node not in path:
+                subgraph_nodes.append(node)
+
+        def mst_cost(subgraph):
+            subG = nx.Graph()
+
+            for n in subgraph:
+                subG.add_node(n)
+
+            for e in self.E:
+                if e.source in subgraph and e.target in subgraph:
+                    subG.add_edge(e.source, e.target, weight=e.weight)
+
+            mst = nx.minimum_spanning_tree(subG, weight='weight')
+
+            return mst.size(weight='weight')
+
+        return cost + mst_cost(subgraph_nodes)
 
     def branch_and_bound(self):
         min_cost = float('inf')
         starting_node = self.V[0]
+        self.states_explored = 0
 
         def branch(visited_nodes, cost=0, current_node=starting_node):
+            # print('visited nodes', visited_nodes)
             nonlocal min_cost
             visited_nodes = visited_nodes[:]
 
@@ -126,12 +204,20 @@ class Graph:
                 # Here we can be checking if branching is pruned
                 # If the minimal cost of this path > minimal hamiltonian found so far -> then prune
                 if self.get_min_est(visited_nodes + [neighbour]) <= min_cost:
-                    branch(visited_nodes + [neighbour], cost + self.get_cost_between_nodes(current_node, neighbour),
+                    branch((visited_nodes + [neighbour])[:],
+                           cost + self.get_cost_between_nodes(current_node, neighbour),
                            neighbour)
+                else:
+                    # print('pruning', visited_nodes + [neighbour])
+                    if len(visited_nodes) <= len(self.V) - 2:
+                        self.num_of_pruned += 1
+                    else:
+                        self.states_explored += 1
 
             # Base Case
-            # Adding new pest paths or returning
+            # Adding new best paths or returning
             if all(neighbour in visited_nodes for neighbour in neighbours):
+                self.states_explored += 1
                 cost += self.get_cost_between_nodes(visited_nodes[-1], starting_node)
                 if cost < min_cost:
                     min_cost = cost
@@ -171,7 +257,7 @@ class Graph:
 
         min_cost = float('inf')
         for path in all_hams:
-            cost = self.get_cost(path)
+            cost = self.get_cost_of_path(path)
             if cost < min_cost:
                 min_cost = cost
                 self.best_hams.clear()
@@ -183,57 +269,110 @@ class Graph:
             return None, None
         return min_cost, self.best_hams
 
-    def get_cost(self, path):
+    def get_cost_of_sub_path(self, sub_path):
+        cost = 0
+        for node in range(len(sub_path) - 1):
+            cost += self.get_cost_between_nodes(sub_path[node], sub_path[node + 1])
+        return cost
+
+    def get_cost_of_path(self, path):
         cost = 0
         for node in range(len(path)):
             cost += self.get_cost_between_nodes(path[node], path[(node + 1) % len(path)])
         return cost
 
     def get_cost_between_nodes(self, node_1, node_2):
-        for edge in self.E:
-            if edge.source == node_1 and edge.target == node_2 or edge.source == node_2 and edge.target == node_1 and not edge.is_oriented:
-                return edge.weight
+        for e in node_1.edges:
+            if e.source == node_1 and e.target == node_2 or e.source == node_2 and e.target == node_1 and not e.is_oriented:
+                return e.weight
         return float('inf')
 
 
-if __name__ == '__main__':
-    have_passed = True
-    for i in range(100):
-        # Nodes
-        # Adding nodes increase the computing complexity quickly
-        # The complexity is O(n!)
-        nodes = []
-        nodes.append(Node('A'))
-        nodes.append(Node('B'))
-        nodes.append(Node('C'))
-        nodes.append(Node('D'))
-        nodes.append(Node('E'))
-        nodes.append(Node('F'))
-        nodes.append(Node('G'))
-        nodes.append(Node('H'))
+def test(number_of_nodes=4, number_of_tests=10):
+    for t in range(number_of_tests):
+        n = []
+        for i in range(number_of_nodes):
+            n.append(Node(str(i)))
 
-        # Edges
-        edges = []
-        for n1 in range(len(nodes)):
-            for n2 in range(len(nodes)):
+        e = []
+        for n1 in range(len(n)):
+            for n2 in range(len(n)):
                 if n1 < n2:
-                    edges.append(Edge(nodes[n1], nodes[n2], random.randint(1, 10)))
+                    edge = Edge(n[n1], n[n2], random.randint(1, 10))
+                    e.append(edge)
 
-        graph = Graph(nodes, edges)
-        cost, tsp_result = graph.minimal_hamiltonian_path()
-        # print('exhaustive search cost:', cost, 'paths:',  tsp_result)
+        g = Graph(n, e)
+        c, tsp_res = g.minimal_hamiltonian_path()
+        bb_res = g.branch_and_bound()
 
-        bb_result = graph.branch_and_bound()
-        # print('tsp result with branch and bound:', bb_result)
+        was_fine = True
+        if len(tsp_res) != len(bb_res):
+            was_fine = False
+        for res in tsp_res:
+            if res not in bb_res:
+                was_fine = False
+        if not was_fine:
+            raise Exception('TSP results are not equal -> Test Failed!')
+    print('Test Passed')
 
-        if len(tsp_result) != len(bb_result):
-            # print('tsp result is different than bb_result')
-            have_passed = False
-        for r_1 in tsp_result:
-            if r_1 not in bb_result:
-                # print('tsp exhaustive result not present in bb_result')
-                have_passed = False
-    if have_passed:
-        print('Passed!')
-    else:
-        print('Failed!')
+
+if __name__ == '__main__':
+    # Testing the branch and bound:
+    # test(6, 100)
+
+    # Nodes
+    # Adding nodes increase the computing complexity quickly
+    # The complexity is O(n!)
+    nodes = []
+    nodes.append(Node('A'))
+    nodes.append(Node('B'))
+    nodes.append(Node('C'))
+    nodes.append(Node('D'))
+    nodes.append(Node('E'))
+    nodes.append(Node('F'))
+    nodes.append(Node('G'))
+    nodes.append(Node('H'))
+    nodes.append(Node('I'))
+    nodes.append(Node('J'))
+    nodes.append(Node('K'))
+    nodes.append(Node('L'))
+    nodes.append(Node('M'))
+    nodes.append(Node('N'))
+    nodes.append(Node('O'))  # 15th node
+    # nodes.append(Node('P'))
+    # nodes.append(Node('Q'))
+    # nodes.append(Node('R'))
+    # nodes.append(Node('S'))
+    # nodes.append(Node('T'))
+    # nodes.append(Node('U'))
+    # nodes.append(Node('V'))
+    # nodes.append(Node('W'))
+    # nodes.append(Node('X'))
+    # nodes.append(Node('Y'))
+    # nodes.append(Node('Z'))
+    # nodes.append(Node('AA'))
+    # nodes.append(Node('AB'))
+    # nodes.append(Node('AC'))
+    # nodes.append(Node('AD')) # 30th Node
+
+    # Edges
+    edges = []
+    counter = 1
+    for n1 in range(len(nodes)):
+        for n2 in range(len(nodes)):
+            if n1 < n2:
+                edge = Edge(nodes[n1], nodes[n2], random.randint(1, 10))  # random.randint(1, 10) or counter
+                edges.append(edge)
+                counter += 1
+
+    graph = Graph(nodes, edges)
+
+    print('starting the branch and bound')
+    start = time.time()
+    bb_result = graph.branch_and_bound()
+    end = time.time()
+    print('num of states explored:', graph.states_explored)
+    print('num of pruned branches:', graph.num_of_pruned)
+    print('compared to worst case: ', str(len(nodes) - 1) + '! =', fact(len(nodes) - 1))
+    print('calculation took:', (end - start), 'seconds')
+    print('cost of path', graph.get_cost_of_path(bb_result[0]))
